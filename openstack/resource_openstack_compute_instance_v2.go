@@ -88,7 +88,7 @@ func resourceComputeInstanceV2() *schema.Resource {
 				Optional:     true,
 				ForceNew:     false,
 				Computed:     true,
-				ValidateFunc: validateHostname(),
+				ValidateFunc: validateHostname,
 			},
 			"user_data": {
 				Type:     schema.TypeString,
@@ -680,9 +680,19 @@ func resourceComputeInstanceV2Read(ctx context.Context, d *schema.ResourceData, 
 		return diag.Errorf("Error creating OpenStack image client: %s", err)
 	}
 
+	// Attempt to read with microversion 2.90
+	computeClient.Microversion = computeV2InstanceCreateServerWithHostnameMicroversion
+
 	server, err := servers.Get(ctx, computeClient, d.Id()).Extract()
 	if err != nil {
-		return diag.FromErr(CheckDeleted(d, err, "server"))
+		log.Printf("[DEBUG] Falling back to the default API call due to: %#v", err)
+		// Fallback to the default microversion
+		computeClient.Microversion = ""
+
+		server, err = servers.Get(ctx, computeClient, d.Id()).Extract()
+		if err != nil {
+			return diag.FromErr(CheckDeleted(d, err, "server"))
+		}
 	}
 
 	log.Printf("[DEBUG] Retrieved Server %s: %+v", d.Id(), server)
@@ -742,26 +752,52 @@ func resourceComputeInstanceV2Read(ctx context.Context, d *schema.ResourceData, 
 
 	d.Set("key_pair", server.KeyName)
 
-	flavorID, ok := server.Flavor["id"].(string)
-	if !ok {
-		return diag.Errorf("Error setting OpenStack server's flavor: %v", server.Flavor)
+	flavorName, ok := server.Flavor["original_name"].(string)
+	if ok {
+		d.Set("flavor_name", flavorName)
 	}
 
-	d.Set("flavor_id", flavorID)
+	flavorID, ok := server.Flavor["id"].(string)
+	if ok {
+		d.Set("flavor_id", flavorID)
+	}
 
-	flavor, err := flavors.Get(ctx, computeClient, flavorID).Extract()
-	if err != nil {
-		if gophercloud.ResponseCodeIs(err, http.StatusNotFound) {
-			// Original flavor was deleted, but it is possible that instance started
-			// with this flavor is still running
-			log.Printf("[DEBUG] Original instance flavor id %s could not be found", d.Id())
-			d.Set("flavor_id", "")
-			d.Set("flavor_name", "")
+	// Starting with microversion 2.47 Nova returns the flavor name but not the flavor ID anymore
+	if flavorName != "" {
+		flavorID, err = flavorsutils.IDFromName(ctx, computeClient, flavorName)
+		if err != nil {
+			var e gophercloud.ErrResourceNotFound
+			if errors.Is(err, &e) {
+				// Original flavor was deleted, but it is possible that instance started
+				// with this flavor is still running
+				log.Printf("[DEBUG] Original flavor of instance with id %s could not be found", d.Id())
+				d.Set("flavor_id", "")
+				d.Set("flavor_name", "")
+			} else {
+				return diag.FromErr(err)
+			}
 		} else {
-			return diag.FromErr(err)
+			d.Set("flavor_id", flavorID)
 		}
+		// Fallback for microversion up to 2.46
+	} else if flavorID != "" {
+		flavor, err := flavors.Get(ctx, computeClient, flavorID).Extract()
+		if err != nil {
+			if gophercloud.ResponseCodeIs(err, http.StatusNotFound) {
+				// Original flavor was deleted, but it is possible that instance started
+				// with this flavor is still running
+				log.Printf("[DEBUG] Original flavor of instance with id %s could not be found", d.Id())
+				d.Set("flavor_id", "")
+				d.Set("flavor_name", "")
+			} else {
+				return diag.FromErr(err)
+			}
+		} else {
+			d.Set("flavor_name", flavor.Name)
+		}
+		// Neither the flavor name nor the flavor ID was returned
 	} else {
-		d.Set("flavor_name", flavor.Name)
+		return diag.Errorf("Error setting OpenStack server's flavor: %v", server.Flavor)
 	}
 
 	// Set the instance's image information appropriately
@@ -796,6 +832,11 @@ func resourceComputeInstanceV2Read(ctx context.Context, d *schema.ResourceData, 
 
 	// Set the hypervisor hostname
 	d.Set("hypervisor_hostname", server.HypervisorHostname)
+
+	// Set the hostname if present
+	if server.Hostname != nil {
+		d.Set("hostname", *server.Hostname)
+	}
 
 	return nil
 }
@@ -1790,10 +1831,17 @@ func suppressPowerStateDiffs(_, old, _ string, _ *schema.ResourceData) bool {
 // validateHostname retruns a validation function which checks if the supplied hostname is a
 // valid FQDN or hostname. While underscores are not allowed in RFC952, nova accepts them.
 // https://github.com/openstack/nova/blob/0d586ccca88ae90b9634ee00b8f7f86a78b09cd0/nova/api/validation/parameter_types.py#L269-L279
-func validateHostname() schema.SchemaValidateFunc {
-	r := regexp.MustCompile(`^[a-zA-Z0-9-\._]{1,255}$`)
+func validateHostname(v any, k string) (ws []string, errors []error) {
+	hostname := v.(string)
 
-	return validation.StringMatch(r, "Invalid hostname. only alphanumeric, . (dot), - (dash) and _ (underscore) are allowed characters in the hostname.")
+	r := regexp.MustCompile(`^[a-zA-Z0-9-\._]{1,255}$`)
+	if ok := r.MatchString(hostname); !ok {
+		errorMessage := "Invalid hostname. only alphanumeric, . (dot), - (dash) and _ (underscore) are allowed characters in the hostname."
+
+		return nil, []error{fmt.Errorf("invalid value for %s (%s)", k, errorMessage)}
+	}
+
+	return nil, nil
 }
 
 // isValidHostname checks if the supplied hostname matches the regexp defined in the nova API.

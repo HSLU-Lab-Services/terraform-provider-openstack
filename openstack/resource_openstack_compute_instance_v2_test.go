@@ -856,6 +856,7 @@ func TestAccComputeV2Instance_hostname(t *testing.T) {
 				Config: testAccComputeInstanceV2HostnameConfig(),
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckComputeV2InstanceExists(t.Context(), "openstack_compute_instance_v2.instance_1", &instance),
+					// resource.TestCheckResourceAttrPtr("openstack_compute_instance_v2.instance_1", "hostname", instance.Hostname),
 				),
 			},
 		},
@@ -879,6 +880,7 @@ func TestAccComputeV2Instance_changeHostname(t *testing.T) {
 				Config: testAccComputeInstanceV2HostnameConfig(),
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckComputeV2InstanceExists(t.Context(), "openstack_compute_instance_v2.instance_1", &instance1),
+					// resource.TestCheckResourceAttrPtr("openstack_compute_instance_v2.instance_1", "hostname", instance1.Hostname),
 				),
 			},
 			{
@@ -886,6 +888,7 @@ func TestAccComputeV2Instance_changeHostname(t *testing.T) {
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckComputeV2InstanceExists(t.Context(), "openstack_compute_instance_v2.instance_1", &instance2),
 					testAccCheckComputeV2InstanceInstanceIDsDoMatch(&instance1, &instance2),
+					// resource.TestCheckResourceAttrPtr("openstack_compute_instance_v2.instance_1", "hostname", instance2.Hostname),
 				),
 			},
 		},
@@ -907,6 +910,7 @@ func TestAccComputeV2Instance_hostnameFqdn(t *testing.T) {
 				Config: testAccComputeInstanceV2HostnameFqdnConfig(),
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckComputeV2InstanceExists(t.Context(), "openstack_compute_instance_v2.instance_1", &instance),
+					// resource.TestCheckResourceAttrPtr("openstack_compute_instance_v2.instance_1", "hostname", instance.Hostname),
 				),
 			},
 		},
@@ -957,6 +961,7 @@ func testAccCheckComputeV2InstanceExists(ctx context.Context, n string, instance
 			return fmt.Errorf("Error creating OpenStack compute client: %w", err)
 		}
 
+		// computeClient.Microversion = computeV2InstanceCreateServerWithHostnameMicroversion
 		found, err := servers.Get(ctx, computeClient, rs.Primary.ID).Extract()
 		if err != nil {
 			return err
@@ -1167,24 +1172,6 @@ func testAccCheckComputeV2InstanceNetworkDoesNotExist(n string, _ *servers.Serve
 	}
 }
 
-func TestUnitValidateHostname(t *testing.T) {
-	validateFunc := validateHostname()
-
-	var err []error
-
-	_, err = validateFunc("test-hostname", "")
-	assert.Empty(t, err)
-
-	_, err = validateFunc("test.fqdn.example.org", "")
-	assert.Empty(t, err)
-
-	_, err = validateFunc("invalid+hostname", "")
-	assert.NotEmpty(t, err)
-
-	_, err = validateFunc("invalid+fqdn.example.org", "")
-	assert.NotEmpty(t, err)
-}
-
 func TestUnitIsValidHostname(t *testing.T) {
 	expected := true
 	actual := isValidHostname("test-hostname")
@@ -1193,6 +1180,22 @@ func TestUnitIsValidHostname(t *testing.T) {
 	expected = false
 	actual = isValidHostname("test.fqdn.example.org")
 	assert.Equal(t, expected, actual)
+}
+
+func TestUnitValidateHostname(t *testing.T) {
+	var err []error
+
+	_, err = validateHostname("test-hostname", "")
+	assert.Empty(t, err)
+
+	_, err = validateHostname("test.fqdn.example.org", "")
+	assert.Empty(t, err)
+
+	_, err = validateHostname("invalid+hostname", "")
+	assert.NotEmpty(t, err)
+
+	_, err = validateHostname("invalid+fqdn.example.org", "")
+	assert.NotEmpty(t, err)
 }
 
 func testAccComputeV2InstanceBasic() string {
